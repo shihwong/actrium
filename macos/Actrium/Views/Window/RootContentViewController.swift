@@ -102,10 +102,10 @@ enum CompactToolbarLayout {
     static let toolbarHeight: CGFloat = 45
     static let tabStripContentPadding: CGFloat = 3
     static let tabStripHeight: CGFloat = 38
-    static let tabSeparationWidth: CGFloat = 1.5
+    static let tabSeparationWidth: CGFloat = 3
     static let layeredBoundaryCapWidth: CGFloat = 18
-    static let edgeTabCornerRadius: CGFloat = 8
-    static let tabCornerRadius: CGFloat = 6
+    static let edgeTabCornerRadius: CGFloat = 16
+    static let tabCornerRadius: CGFloat = 16
     static let horizontalPadding: CGFloat = 8
     static let itemSpacing: CGFloat = 8
     static let buttonSize: CGFloat = 30
@@ -692,6 +692,12 @@ struct MainWindowTabsView: View {
     @State private var addressPresentationTask: Task<Void, Never>?
     @State private var addressPresentationPhase: AddressEditingPresentationPhase = .backgroundOnly
     @State private var tabStripContentOffsetX: CGFloat = 0
+    /// Visual frames of every group in strip coordinates, mirrored from the
+    /// preference key so the strip-level border underlay can position itself.
+    @State private var groupFrames: [UUID: CGRect] = [:]
+    /// The group that most recently contained the current Tab. Keeps the
+    /// underlay mounted while its flares retract when focus leaves the group.
+    @State private var lastActiveGroupID: UUID?
     @StateObject private var addressPanelPresentation = AddressBarPanelPresentationCoordinator()
 
     private let itemSpacing = CompactToolbarLayout.itemSpacing
@@ -773,6 +779,10 @@ struct MainWindowTabsView: View {
             )
 
             ZStack(alignment: .topLeading) {
+                // The active group's flares and feet render beneath the whole
+                // strip content so they can pass under the neighboring Tabs.
+                activeGroupBorderUnderlay(viewportWidth: geo.size.width)
+
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 0) {
@@ -848,12 +858,57 @@ struct MainWindowTabsView: View {
         }
         .onPreferenceChange(ToolbarTabGroupFramePreferenceKey.self) {
             interaction.updateGroupFrames($0)
+            groupFrames = $0
+        }
+        .onChange(of: viewModel.currentTab?.groupId) { _, newGroupID in
+            if let newGroupID {
+                lastActiveGroupID = newGroupID
+            }
         }
         .onPreferenceChange(ToolbarTabGroupHeaderFramePreferenceKey.self) {
             interaction.updateGroupHeaderFrames($0)
         }
         .simultaneousGesture(tabReorderGesture)
         .frame(height: CompactToolbarLayout.tabStripHeight)
+    }
+
+    /// The active group's extended border strokes, drawn beneath the whole
+    /// strip content: concave quarter arcs flaring from the top corner ends
+    /// down to the strip bottom, continuing as horizontal feet that run under
+    /// the Tabs on both sides of the group.
+    @ViewBuilder
+    private func activeGroupBorderUnderlay(viewportWidth: CGFloat) -> some View {
+        let groupID = viewModel.currentTab?.groupId ?? lastActiveGroupID
+        if let groupID,
+           let group = viewModel.tabGroups.first(where: { $0.id == groupID }),
+           !group.isCollapsed,
+           let frame = groupFrames[groupID] {
+            let sections = tabSections
+            GroupActiveBorderFeetShape(
+                leadingRadius: sections.first?.group?.id == group.id
+                    ? CompactToolbarLayout.edgeTabCornerRadius
+                    : CompactToolbarLayout.tabCornerRadius,
+                trailingRadius: sections.last?.group?.id == group.id
+                    ? CompactToolbarLayout.edgeTabCornerRadius
+                    : CompactToolbarLayout.tabCornerRadius,
+                sideExtension: viewModel.currentTab?.groupId == group.id ? 1 : 0,
+                trailingInset: group.isCollapsed
+                    ? 0
+                    : CompactToolbarLayout.tabSeparationWidth,
+                // The feet reach the strip's viewport edges, translated into
+                // the shape's local coordinate space (the group's own frame).
+                leadingFootX: -frame.minX,
+                trailingFootX: viewportWidth - frame.minX
+            )
+            .stroke(
+                group.color.swiftUIColor.opacity(groupBorderOpacity),
+                style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
+            )
+            .animation(.easeOut(duration: 0.28), value: viewModel.currentTab?.groupId)
+            .frame(width: frame.width, height: frame.height, alignment: .topLeading)
+            .position(x: frame.midX, y: frame.midY)
+            .allowsHitTesting(false)
+        }
     }
 
     private func revealActiveTabIfNeeded(in proxy: ScrollViewProxy) {
@@ -987,8 +1042,22 @@ struct MainWindowTabsView: View {
     }
 
     private func groupLabelWidth(_ group: TabGroup) -> CGFloat {
-        let title = group.name.isEmpty ? "Tab Group" : group.name
-        return min(158, max(82, CGFloat(title.count) * 7 + 48))
+        // Nameless header: only the collapse chevron (16) plus horizontal
+        // padding (10), with a little breathing room.
+        guard !group.name.isEmpty else {
+            // Collapsed: chevron (16) + spacing (3) + a count badge
+            // (digits + 12 padding) + horizontal padding (10).
+            if group.isCollapsed {
+                let memberCount = viewModel.tabs.filter { $0.groupId == group.id }.count
+                let countDigits = max(1, String(max(memberCount, 0)).count)
+                return 45 + CGFloat(countDigits) * 6
+            }
+            return 34
+        }
+        // Named header: chevron (16) + spacing (3) + up to 10 name characters
+        // + spacing (5) + count digits + horizontal padding (10).
+        let displayChars = min(10, group.name.count)
+        return min(158, max(82, CGFloat(displayChars) * 7 + 34))
     }
 
     private func tabStripWidth(in toolbarWidth: CGFloat) -> CGFloat {
@@ -1398,6 +1467,38 @@ struct MainWindowTabsView: View {
             groupSurface(for: group, isMoving: false)
         }
         .background {
+            // Group border cap at rest: the top line plus both rounded top
+            // corners, shown only while the group is expanded — a collapsed
+            // group carries no border, its count badge carries the identity.
+            // The active group's extended strokes (concave flares and feet
+            // under the neighboring Tabs) are drawn by the strip-level
+            // underlay below all Tab content.
+            if !group.isCollapsed {
+                let sections = tabSections
+                GroupBorderCapShape(
+                    leadingRadius: sections.first?.group?.id == group.id
+                        ? CompactToolbarLayout.edgeTabCornerRadius
+                        : CompactToolbarLayout.tabCornerRadius,
+                    trailingRadius: sections.last?.group?.id == group.id
+                        ? CompactToolbarLayout.edgeTabCornerRadius
+                        : CompactToolbarLayout.tabCornerRadius,
+                    sideExtension: 0,
+                    // The last member Tab's plate is inset by the separation
+                    // width inside its slot. Inset the border the same amount
+                    // so its right edge touches the Tab surface with zero
+                    // spacing (a collapsed group is header-only, whose fill
+                    // already spans the full width).
+                    trailingInset: group.isCollapsed
+                        ? 0
+                        : CompactToolbarLayout.tabSeparationWidth
+                )
+                .stroke(
+                    group.color.swiftUIColor.opacity(groupBorderOpacity),
+                    style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
+                )
+            }
+        }
+        .background {
             GeometryReader { proxy in
                 Color.clear.preference(
                     key: ToolbarTabGroupFramePreferenceKey.self,
@@ -1406,13 +1507,6 @@ struct MainWindowTabsView: View {
                     ]
                 )
             }
-        }
-        .overlay {
-            groupShape(for: group)
-                .strokeBorder(
-                    group.color.swiftUIColor.opacity(groupBorderOpacity),
-                    lineWidth: 1.5
-                )
         }
         .opacity(isMoving ? 0 : 1)
         .transition(.identity)
@@ -1423,19 +1517,17 @@ struct MainWindowTabsView: View {
         content
     }
 
-    /// Static groups keep the toolbar's translucent tint. While the group is
-    /// moving, Chrome treats the header and every member Tab as one foreground
-    /// surface, so the same tint is composited over an opaque toolbar-colored
-    /// plate. Nothing underneath the dragged group can bleed through.
+    /// Groups carry no resting surface tint — the header chip and the border
+    /// cap carry the group color, while the member Tabs keep the plain
+    /// toolbar surface. While the group is moving, Chrome treats the header
+    /// and every member Tab as one foreground surface on an opaque
+    /// toolbar-colored plate. Nothing underneath the dragged group can bleed
+    /// through.
     private func groupSurface(for group: TabGroup, isMoving: Bool) -> some View {
         let shape = groupShape(for: group)
 
         return ZStack {
-            // Keep both layers in one non-animated surface. This matches the
-            // moving Tab plate and prevents a transient opacity interpolation
-            // when the group first leaves its layout slot.
             shape.fill(isMoving ? AppColors.windowChromeDragPlateColor : Color.clear)
-            shape.fill(group.color.swiftUIColor.opacity(0.08))
         }
         .transaction { transaction in
             transaction.animation = nil
@@ -1443,10 +1535,13 @@ struct MainWindowTabsView: View {
     }
 
     private func groupHeader(_ group: TabGroup, tabCount: Int) -> some View {
-        let title = group.name.isEmpty ? "Tab Group" : group.name
         let containsCurrentTab = viewModel.currentTab?.groupId == group.id
         let trailingSeparation = group.isCollapsed
             ? 0 : CompactToolbarLayout.tabSeparationWidth
+        // Named groups show at most 10 characters; longer names truncate.
+        let displayName = group.name.count > 10
+            ? String(group.name.prefix(10)) + "…"
+            : group.name
 
         return HStack(spacing: 3) {
             Button {
@@ -1462,37 +1557,54 @@ struct MainWindowTabsView: View {
             .buttonStyle(.plain)
             .help(group.isCollapsed ? "Expand Group" : "Collapse Group")
 
-            Button {
-                exitEditingMode()
-                groupNameDraft = group.name
-                editingGroupID = group.id
-            } label: {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(group.color.swiftUIColor)
-                        .frame(width: 9, height: 9)
+            // A group without a custom name shows only the collapse chevron
+            // while expanded; collapsed, a color badge carries the member
+            // count. Renaming stays available through the header context menu
+            // and the editor popover below.
+            if !group.name.isEmpty {
+                Button {
+                    exitEditingMode()
+                    groupNameDraft = group.name
+                    editingGroupID = group.id
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(displayName)
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
 
-                    Text(title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
-
-                    Text("\(tabCount)")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        Text("\(tabCount)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
-            .help("Edit Tab Group")
-            .popover(isPresented: groupEditorBinding(for: group), arrowEdge: .bottom) {
-                groupEditor(group)
+                .buttonStyle(.plain)
+                .help("Edit Tab Group")
+            } else if group.isCollapsed {
+                // Collapsed nameless group: the member count as a bare number
+                // in the group color — no badge background.
+                Text("\(tabCount)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(group.color.swiftUIColor)
+                    .help("Expand Group (\(tabCount) tabs)")
             }
         }
         .padding(.horizontal, 5)
-        .frame(width: groupLabelWidth(group) - trailingSeparation, height: 30)
+        // Leading alignment keeps the collapse chevron pinned at the same
+        // spot whether the group is expanded or collapsed.
+        .frame(
+            width: groupLabelWidth(group) - trailingSeparation,
+            height: 30,
+            alignment: .leading
+        )
         .background {
             groupHeaderShape(for: group)
                 .fill(group.color.swiftUIColor.opacity(containsCurrentTab ? 0.32 : 0.2))
+        }
+        // The editor popover anchors to the whole header so it presents even
+        // for nameless groups (whose label button is not rendered).
+        .popover(isPresented: groupEditorBinding(for: group), arrowEdge: .bottom) {
+            groupEditor(group)
         }
         // The next Tab already contributes its leading half of the seam.
         // Reserve the same trailing half that every Tab surface contributes.
@@ -1512,7 +1624,9 @@ struct MainWindowTabsView: View {
                 viewModel.closeGroup(groupId: group.id, historyVM: historyVM)
             }
         }
-        .accessibilityLabel("\(title), \(tabCount) tabs")
+        .accessibilityLabel(
+            group.name.isEmpty ? "\(tabCount) tabs" : "\(group.name), \(tabCount) tabs"
+        )
     }
 
     private func groupEditorBinding(for group: TabGroup) -> Binding<Bool> {
@@ -2021,24 +2135,37 @@ struct MainWindowTabsView: View {
                     // The action plate fades in from the trailing address text:
                     // transparent at the leading edge, fully the active Tab plate
                     // color from 10% onward. Sitting above the address field, it
-                    // also occludes the text when the Tab is narrow.
-                    LinearGradient(
-                        stops: [
-                            .init(
-                                color: AppColors.windowChromeActiveTabPlateColor.opacity(0),
-                                location: 0
-                            ),
-                            .init(
-                                color: AppColors.windowChromeActiveTabPlateColor,
-                                location: 0.1
-                            ),
-                            .init(
-                                color: AppColors.windowChromeActiveTabPlateColor,
-                                location: 1
-                            ),
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
+                    // also occludes the text when the Tab is narrow. The right
+                    // corners round large (capsule) to meet the Tab's edges;
+                    // the left edge stays square under the gradient fade.
+                    UnevenRoundedRectangle(
+                        cornerRadii: .init(
+                            topLeading: 0,
+                            bottomLeading: 0,
+                            bottomTrailing: CompactToolbarLayout.edgeTabCornerRadius,
+                            topTrailing: CompactToolbarLayout.edgeTabCornerRadius
+                        ),
+                        style: .continuous
+                    )
+                    .fill(
+                        LinearGradient(
+                            stops: [
+                                .init(
+                                    color: AppColors.windowChromeActiveTabPlateColor.opacity(0),
+                                    location: 0
+                                ),
+                                .init(
+                                    color: AppColors.windowChromeActiveTabPlateColor,
+                                    location: 0.1
+                                ),
+                                .init(
+                                    color: AppColors.windowChromeActiveTabPlateColor,
+                                    location: 1
+                                ),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
                     )
                 }
             }
@@ -2261,6 +2388,195 @@ struct MainWindowTabsView: View {
             disabled: disabled,
             action: action
         )
+    }
+}
+
+/// The toolbar group border cap: the top line plus both rounded top corners,
+/// traced `clearance` points outside the group content on every side so the
+/// strokes keep breathing space from the member Tabs.
+///
+/// `sideExtension` (0…1) grows the two side edges downward from the corner
+/// ends — 0 renders the cap alone, 1 reaches the bottom. Animated so the
+/// sides extend from the top when the group gains the current Tab and
+/// retract when it loses it.
+private struct GroupBorderCapShape: Shape {
+    var leadingRadius: CGFloat
+    var trailingRadius: CGFloat
+    var sideExtension: CGFloat
+    /// Inset applied to the right edge of the content rect, so the border can
+    /// hug the last member Tab's plate instead of the group slot edge.
+    var trailingInset: CGFloat = 0
+    /// Visible space between the stroke and the content on every side. The
+    /// path is pushed out by an extra half stroke width so the stroke's inner
+    /// edge (not its center line) keeps this clearance.
+    var clearance: CGFloat = 1
+    /// Width of the stroke drawn over this shape; half of it is added to the
+    /// clearance so the visible gap matches `clearance`.
+    var strokeWidth: CGFloat = 1.5
+
+    var animatableData: CGFloat {
+        get { sideExtension }
+        set { sideExtension = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        // Content rect: the group content, right edge at the last Tab plate.
+        let contentWidth = max(0, rect.width - trailingInset)
+        let contentHeight = rect.height
+
+        // Border rect: the content expanded outward so the stroke's inner
+        // edge keeps `clearance` points of visible space. The corner radii
+        // grow by the same amount so the offset stays uniform along the arcs.
+        let offset = clearance + strokeWidth * 0.5
+        let x0 = -offset
+        let y0 = -offset
+        let width = contentWidth + offset * 2
+        let height = contentHeight + offset * 2
+        let lr = min(leadingRadius + offset, width / 2, height / 2)
+        let tr = min(trailingRadius + offset, width / 2, height / 2)
+
+        var path = Path()
+        let leadingCornerEnd = CGPoint(x: x0, y: y0 + lr)
+        let trailingCornerEnd = CGPoint(x: x0 + width, y: y0 + tr)
+
+        // Leading top corner: (x0, y0 + lr) → (x0 + lr, y0)
+        path.move(to: leadingCornerEnd)
+        path.addArc(
+            center: CGPoint(x: x0 + lr, y: y0 + lr),
+            radius: lr,
+            startAngle: .degrees(180),
+            endAngle: .degrees(270),
+            clockwise: false
+        )
+        // Top edge
+        path.addLine(to: CGPoint(x: x0 + width - tr, y: y0))
+        // Trailing top corner: (x0 + width - tr, y0) → (x0 + width, y0 + tr)
+        path.addArc(
+            center: CGPoint(x: x0 + width - tr, y: y0 + tr),
+            radius: tr,
+            startAngle: .degrees(270),
+            endAngle: .degrees(0),
+            clockwise: false
+        )
+
+        // Side arcs growing downward from each corner end. Instead of
+        // vertical lines, each side curves inward toward the group — the
+        // concave hollow faces outward — by `bow` points at mid height. The
+        // animated extension reveals the arcs from the top down.
+        let extensionFraction = min(1, max(0, sideExtension))
+        if extensionFraction > 0 {
+            let bow = 3.0
+            let leadingChord = height - lr
+            let trailingChord = height - tr
+
+            var leadingSide = Path()
+            leadingSide.move(to: leadingCornerEnd)
+            leadingSide.addQuadCurve(
+                to: CGPoint(x: x0, y: y0 + height),
+                control: CGPoint(
+                    x: x0 + bow * 2,
+                    y: y0 + lr + leadingChord / 2
+                )
+            )
+            path.addPath(leadingSide.trim(from: 0, to: extensionFraction).path(in: rect))
+
+            var trailingSide = Path()
+            trailingSide.move(to: trailingCornerEnd)
+            trailingSide.addQuadCurve(
+                to: CGPoint(x: x0 + width, y: y0 + height),
+                control: CGPoint(
+                    x: x0 + width - bow * 2,
+                    y: y0 + tr + trailingChord / 2
+                )
+            )
+            path.addPath(trailingSide.trim(from: 0, to: extensionFraction).path(in: rect))
+        }
+
+        return path
+    }
+}
+
+/// The active group's extended border strokes: on each side a concave
+/// quarter arc flares from the top corner end (tangent-vertical) down past
+/// the strip bottom (tangent-horizontal), continuing as a horizontal foot
+/// that runs beneath the neighboring Tabs toward the strip edge. The top cap
+/// itself is drawn per-group; this shape renders only the growing sides and
+/// feet, and `sideExtension` (0…1) reveals them from the top down.
+private struct GroupActiveBorderFeetShape: Shape {
+    var leadingRadius: CGFloat
+    var trailingRadius: CGFloat
+    var sideExtension: CGFloat
+    /// Inset applied to the right edge of the content rect, matching the
+    /// per-group cap so the flare starts where the cap's corner ends.
+    var trailingInset: CGFloat = 0
+    /// Local x of the strip's left edge; the leading foot ends here.
+    var leadingFootX: CGFloat = 0
+    /// Local x of the strip's right edge; the trailing foot ends here.
+    var trailingFootX: CGFloat = 0
+    /// Visible space between the stroke and the content on every side.
+    var clearance: CGFloat = 1
+    /// Half of this is added to the clearance so the visible gap matches it.
+    var strokeWidth: CGFloat = 1.5
+
+    var animatableData: CGFloat {
+        get { sideExtension }
+        set { sideExtension = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let extensionFraction = min(1, max(0, sideExtension))
+        guard extensionFraction > 0 else { return Path() }
+
+        let contentWidth = max(0, rect.width - trailingInset)
+        let contentHeight = rect.height
+        let offset = clearance + strokeWidth * 0.5
+        let x0 = -offset
+        let y0 = -offset
+        let width = contentWidth + offset * 2
+        let height = contentHeight + offset * 2
+        let lr = min(leadingRadius + offset, width / 2, height / 2)
+        let tr = min(trailingRadius + offset, width / 2, height / 2)
+        let bottom = y0 + height
+
+        var path = Path()
+
+        // Leading flare: quarter arc centered up-left of the corner end,
+        // sweeping from vertical (at the corner end) to horizontal (at the
+        // strip bottom), then the foot toward the strip's left edge.
+        let leadingFlare = height - lr
+        if leadingFlare > 0 {
+            let flareEndX = x0 - leadingFlare
+            var leading = Path()
+            leading.move(to: CGPoint(x: x0, y: y0 + lr))
+            leading.addArc(
+                center: CGPoint(x: flareEndX, y: y0 + lr),
+                radius: leadingFlare,
+                startAngle: .degrees(0),
+                endAngle: .degrees(90),
+                clockwise: false
+            )
+            leading.addLine(to: CGPoint(x: min(leadingFootX, flareEndX), y: bottom))
+            path.addPath(leading.trim(from: 0, to: extensionFraction).path(in: rect))
+        }
+
+        // Trailing flare, mirrored to the right.
+        let trailingFlare = height - tr
+        if trailingFlare > 0 {
+            let flareEndX = x0 + width + trailingFlare
+            var trailing = Path()
+            trailing.move(to: CGPoint(x: x0 + width, y: y0 + tr))
+            trailing.addArc(
+                center: CGPoint(x: flareEndX, y: y0 + tr),
+                radius: trailingFlare,
+                startAngle: .degrees(180),
+                endAngle: .degrees(90),
+                clockwise: true
+            )
+            trailing.addLine(to: CGPoint(x: max(trailingFootX, flareEndX), y: bottom))
+            path.addPath(trailing.trim(from: 0, to: extensionFraction).path(in: rect))
+        }
+
+        return path
     }
 }
 

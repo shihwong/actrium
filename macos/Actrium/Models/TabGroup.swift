@@ -49,31 +49,26 @@ enum TabGroupColor: String, Codable, CaseIterable {
     case orange
 
     var swiftUIColor: Color {
-        switch self {
-        case .gray:   return Color.gray
-        case .blue:   return Color.blue
-        case .red:    return Color.red
-        case .yellow: return Color.yellow
-        case .green:  return Color.green
-        case .pink:   return Color.pink
-        case .purple: return Color.purple
-        case .cyan:   return Color.cyan
-        case .orange: return Color.orange
-        }
+        // Same hue as the system color, with reduced saturation and raised
+        // brightness — soft pastel tones that read as tints on the toolbar.
+        Color(nsColor: nsColor)
     }
 
     var nsColor: NSColor {
-        // Softer pastel colors matching the design
+        // Soft pastel palette: hue unchanged, saturation lowered, brightness
+        // raised. Both the group editor swatches and every group surface
+        // (dot, header fill, border cap, sidebar indicators) derive from this
+        // one table so the color reads consistently everywhere.
         switch self {
-        case .gray:   return NSColor(red: 0.7, green: 0.7, blue: 0.7, alpha: 1.0)
-        case .blue:   return NSColor(red: 0.55, green: 0.65, blue: 0.95, alpha: 1.0)
-        case .red:    return NSColor(red: 0.95, green: 0.6, blue: 0.6, alpha: 1.0)
-        case .yellow: return NSColor(red: 0.95, green: 0.85, blue: 0.5, alpha: 1.0)
-        case .green:  return NSColor(red: 0.6, green: 0.85, blue: 0.6, alpha: 1.0)
-        case .pink:   return NSColor(red: 0.95, green: 0.7, blue: 0.85, alpha: 1.0)
-        case .purple: return NSColor(red: 0.75, green: 0.6, blue: 0.9, alpha: 1.0)
-        case .cyan:   return NSColor(red: 0.5, green: 0.85, blue: 0.9, alpha: 1.0)
-        case .orange: return NSColor(red: 0.95, green: 0.75, blue: 0.55, alpha: 1.0)
+        case .gray:   return NSColor(red: 0.78, green: 0.78, blue: 0.78, alpha: 1.0)
+        case .blue:   return NSColor(red: 0.55, green: 0.68, blue: 1.00, alpha: 1.0)
+        case .red:    return NSColor(red: 1.00, green: 0.65, blue: 0.65, alpha: 1.0)
+        case .yellow: return NSColor(red: 1.00, green: 0.88, blue: 0.55, alpha: 1.0)
+        case .green:  return NSColor(red: 0.65, green: 0.92, blue: 0.65, alpha: 1.0)
+        case .pink:   return NSColor(red: 1.00, green: 0.72, blue: 0.87, alpha: 1.0)
+        case .purple: return NSColor(red: 0.78, green: 0.65, blue: 0.95, alpha: 1.0)
+        case .cyan:   return NSColor(red: 0.55, green: 0.90, blue: 0.92, alpha: 1.0)
+        case .orange: return NSColor(red: 1.00, green: 0.78, blue: 0.60, alpha: 1.0)
         }
     }
 
