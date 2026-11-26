@@ -82,9 +82,6 @@ final class TabSnapshotCacheManager {
         cache.snapshot = image
         cache.snapshotTime = Date()
         caches[tabId] = cache
-
-        NSLog("📸 TabSnapshotCache: snapshot updated for tab %@, size=%@",
-              String(tabId.uuidString.prefix(8)), NSStringFromSize(image.size))
     }
 
     /// Set Focus snapshot (large, viewport size)
@@ -108,13 +105,10 @@ final class TabSnapshotCacheManager {
     /// Invalidate cache for a tab
     func invalidate(tabId: UUID) {
         caches.removeValue(forKey: tabId)
-        NSLog("🗑️ TabSnapshotCache: Cache invalidated for tab %@",
-              String(tabId.uuidString.prefix(8)))
     }
 
     /// Invalidate all caches
     func invalidateAll() {
         caches.removeAll()
-        NSLog("🗑️ TabSnapshotCache: All caches invalidated")
     }
 }

@@ -682,9 +682,9 @@ final class WebViewHolder: NSObject, WKNavigationDelegate {
             // Use the webView's current size for the snapshot
             let image = try await webView.takeSnapshot(configuration: config)
             self.snapshot = image
-            NSLog("📸 WebViewHolder: Snapshot captured")
         } catch {
-            NSLog("📸 WebViewHolder: Failed to capture snapshot - \(error.localizedDescription)")
+            // A failed capture leaves the previous image in place; the next
+            // navigation or resize will try again.
         }
     }
 
@@ -982,8 +982,31 @@ final class WebViewHolderManager {
     private var resizeCaptureTask: Task<Void, Never>?
     private var resizeEndObserver: NSObjectProtocol?
 
+    /// Windows whose workspace is presenting the overview grid right now.
+    ///
+    /// The grid draws the cached images directly, so replacing one mid-resize
+    /// makes the cards swap content under the user. The recapture would also
+    /// be wrong while it runs: in overview a Tab's WebView is laid out at card
+    /// size, so the capture would cache a card-sized image for a transition
+    /// that expects viewport geometry.
+    private var overviewWindows: Set<ObjectIdentifier> = []
+
     private init() {
         installResizeEndObserver()
+    }
+
+    /// Called by a workspace as it enters and leaves the overview grid. A
+    /// window that leaves overview recaptures immediately, so the images it
+    /// skipped are refreshed before the next transition reads them.
+    func setOverviewActive(_ active: Bool, in window: NSWindow?) {
+        guard let window else { return }
+        let id = ObjectIdentifier(window)
+        if active {
+            overviewWindows.insert(id)
+        } else {
+            overviewWindows.remove(id)
+            scheduleResizeCapture(for: window)
+        }
     }
 
     /// After a window resize ends, re-capture every web tab once layout has
@@ -1001,22 +1024,30 @@ final class WebViewHolderManager {
             queue: .main
         ) { [weak self] notification in
             guard let self = self else { return }
-            let resizedWindow = notification.object as? NSWindow
-            self.resizeCaptureTask?.cancel()
-            self.resizeCaptureTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 350_000_000) // 0.35s debounce
-                guard let self = self, !Task.isCancelled else { return }
-                for (tabId, holder) in self.holders {
-                    // Scope the recapture to the window that actually
-                    // resized: a Tab refreshes only while its WebView is
-                    // still hosted by that window. A detached holder (no host
-                    // window) and Tabs in other windows keep their cached
-                    // image instead of recapturing through a window they are
-                    // no longer displayed in.
-                    guard let resizedWindow,
-                          holder.webView.window === resizedWindow else { continue }
-                    await self.takeSnapshot(for: tabId)
-                }
+            self.scheduleResizeCapture(for: notification.object as? NSWindow)
+        }
+    }
+
+    private func scheduleResizeCapture(for resizedWindow: NSWindow?) {
+        resizeCaptureTask?.cancel()
+        resizeCaptureTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000) // 0.35s debounce
+            guard let self = self, !Task.isCancelled else { return }
+            // An overview grid holds the images it is drawing: leave them
+            // alone until the window leaves overview.
+            if let resizedWindow,
+               self.overviewWindows.contains(ObjectIdentifier(resizedWindow)) {
+                return
+            }
+            for (tabId, holder) in self.holders {
+                // Scope the recapture to the window that actually resized: a
+                // Tab refreshes only while its WebView is still hosted by that
+                // window. A detached holder (no host window) and Tabs in other
+                // windows keep their cached image instead of recapturing
+                // through a window they are no longer displayed in.
+                guard let resizedWindow,
+                      holder.webView.window === resizedWindow else { continue }
+                await self.takeSnapshot(for: tabId)
             }
         }
     }
