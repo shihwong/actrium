@@ -135,11 +135,6 @@ struct WorkspaceMainView: View {
 
     var body: some View {
         // viewportSize comes from Environment (set by WorkspaceMainViewport)
-        let _ = {
-            NSLog("📐 [VIEWPORT] viewportSize=%.1fx%.1f, mode=%@",
-                  viewportSize.width, viewportSize.height, String(describing: viewModel.actriumMode))
-        }()
-
         // Safe viewport size (avoid zero/small dimensions that cause layout issues)
         // Use a greater minimum value to avoid extreme width ratio cardHeight It's huge.
         // When? viewportSize.width=0 I'm not sure if I'm going to be able to do this.cardAspectRatio=1/100=0.01, cardHeight=120/0.01=12000
@@ -715,6 +710,12 @@ struct WorkspaceMainView: View {
                 searchTabsText = ""
                 isSearchTabsFocused = false
             }
+            // The overview grid draws the cached snapshots directly, so this
+            // window holds them: resizing must not swap the images under it.
+            WebViewHolderManager.shared.setOverviewActive(
+                newValue == .overview,
+                in: hostingWindow
+            )
             // Note: isOverviewMode By ViewBridgeCoordinatorManager Subscriptions actriumMode AutoSync
         }
         // Bind snapshot captures to the window that hosts this workspace.
@@ -1072,49 +1073,31 @@ struct WorkspaceMainView: View {
 
         fputs("🔴 exitToOverview()\n", stderr)
 
-        // 🔑 Intercept Current Focus Under Mode Tab Content snapshot (large chart)
-        // This is... Focus → Overview Animation Starts
-        // Note:applyBlur=false Ensure that the settings are synchronized and are available immediately from the start of the animation
-        // Native Start Pages render live in overview. Capturing the entire
-        // window for them blocks the main thread during the transition.
-        let focusSnapshot: NSImage?
+        // Reuse the image this Tab already keeps. The cache holds the latest
+        // capture of every page, refreshed on navigation and on resize, so a
+        // transition never has to read the screen itself.
+        //
+        // Capturing the viewport here would copy the whole window on the main
+        // thread on the way into the animation — the one moment the frame
+        // budget cannot absorb it. A Tab that has no image yet switches
+        // without the zoom instead.
+        let hasTransitionSnapshot: Bool
         if let tab = viewModel.tabs.first(where: { $0.id == currentTabId }) {
             switch tab.contentType {
             case .native, .empty:
-                focusSnapshot = nil
+                // Native Start Pages render live in overview and need no image.
+                hasTransitionSnapshot = false
             case .web, .reactNative:
-                focusSnapshot = captureViewportSnapshot(viewportSize: viewportSize, in: hostingWindow)
+                hasTransitionSnapshot = TabSnapshotCacheManager.shared.snapshot(for: currentTabId) != nil
             }
         } else {
-            focusSnapshot = nil
-        }
-        if let snapshot = focusSnapshot {
-            TabSnapshotCacheManager.shared.setFocusSnapshot(snapshot, for: currentTabId, applyBlur: false)
-
-            // Setup simultaneously Overview Quickshot (Scalp to Card Size)
-            // Count the card size first.
-            let safeViewportSizeForCard = CGSize(
-                width: max(viewportSize.width, 100),
-                height: max(viewportSize.height, 100)
-            )
-            let cardAspectRatio = safeViewportSizeForCard.width / safeViewportSizeForCard.height
-            let gridResultForCard = gridLayout(
-                for: safeViewportSizeForCard,
-                cardAspectRatio: cardAspectRatio,
-                cardCount: filteredTabs.count
-            )
-            let cardSize = CGSize(width: gridResultForCard.cardWidth, height: gridResultForCard.cardHeight)
-            // applyBlur=false Ensure Sync settings
-            TabSnapshotCacheManager.shared.setOverviewSnapshot(snapshot, for: currentTabId, targetSize: cardSize, applyBlur: false)
+            hasTransitionSnapshot = false
         }
 
-        // Fallback: neither a fresh capture nor a cached image exists → the
-        // zoom-out would animate an empty slot over the gray base layer.
-        // Skip the image-based animation and switch directly.
-        guard focusSnapshot != nil
-            || TabSnapshotCacheManager.shared.focusSnapshot(for: currentTabId) != nil else {
-            NSLog("🎬 exitToOverview: no snapshot for tab %@, direct switch (no animation)",
-                  String(currentTabId.uuidString.prefix(8)))
+        // Fallback: no cached image exists → the zoom-out would animate an
+        // empty slot over the gray base layer. Skip the image-based animation
+        // and switch directly.
+        guard hasTransitionSnapshot else {
             viewModel.actriumMode = .overview
             return
         }
@@ -1172,8 +1155,6 @@ struct WorkspaceMainView: View {
         viewportSize: CGSize,
         in window: NSWindow?
     ) -> NSImage? {
-        let startTime = CACurrentMediaTime()
-
         guard let window, let contentView = window.contentView else {
             return nil
         }
@@ -1199,30 +1180,17 @@ struct WorkspaceMainView: View {
             height: viewportSize.height
         )
 
-        NSLog("📸 captureViewportSnapshot: windowSize=%.0fx%.0f, viewportSize=%.0fx%.0f, toolbarHeight=%.0f, isFlipped=%d, captureRect=(%.0f,%.0f,%.0f,%.0f)",
-              windowSize.width, windowSize.height,
-              viewportSize.width, viewportSize.height,
-              toolbarHeight, isFlipped ? 1 : 0,
-              captureRect.origin.x, captureRect.origin.y, captureRect.width, captureRect.height)
-
         // Creates a direct access area bitmap
         guard let bitmapRep = contentView.bitmapImageRepForCachingDisplay(in: captureRect) else {
             return nil
         }
 
-        let cacheTime = CACurrentMediaTime()
         contentView.cacheDisplay(in: captureRect, to: bitmapRep)
-        let captureTime = CACurrentMediaTime()
 
         // Keep the bitmap at its native dimensions. Redrawing with lockFocus
         // adds main-thread work and stretches the transition by one point.
         let image = NSImage(size: viewportSize)
         image.addRepresentation(bitmapRep)
-
-        let endTime = CACurrentMediaTime()
-        NSLog("📸 captureViewportSnapshot: %.1fms (cache: %.1fms)",
-              (endTime - startTime) * 1000,
-              (captureTime - cacheTime) * 1000)
 
         return image
     }
@@ -1515,7 +1483,6 @@ struct WorkspaceMainView: View {
 
         // Cache newly created images
         Self.cachedAddButtonImage = (image: image, size: size, appearanceName: appearanceName)
-
         return image
     }
 
@@ -1718,9 +1685,7 @@ private struct TabGridView: View {
     }
 
 
-    var body: some View {
-        let _ = NSLog("🔄 [ACTRIUM-BODY] TabGridView.body evaluated: tabs=%d, mode=%@", tabs.count, String(describing: mode))
-        ZStack(alignment: .topLeading) {
+    var body: some View {        ZStack(alignment: .topLeading) {
             // Painting background
             Color.clear
 
@@ -2365,8 +2330,6 @@ private struct TabPanel: View {
     }
 
     var body: some View {
-        let _ = NSLog("🔄 [TABCARD-BODY] TabPanel.body: tabId=%@, isFocused=%d", tab.id.uuidString, isFocused ? 1 : 0)
-
         // Outer dimension: always used cardWidth/cardHeight
         // Actrium The change is in. Focus Zoom down to Mode viewportSize
         // If this is used here viewportSize♪ Will be with actrium scale The superimposed cause over-expanding.
@@ -2497,12 +2460,6 @@ private struct TabPanel: View {
         } else {
             renderSize = CGSize(width: max(cardWidth, 1), height: max(cardHeight, 1))
         }
-
-        let _ = NSLog("📐 TabPanel.contentView: type=%@, isFocused=%d, viewportSize=%.0fx%.0f, cardSize=%.0fx%.0f, renderSize=%.0fx%.0f",
-                      String(describing: tab.contentType), isFocused ? 1 : 0,
-                      viewportSize.width, viewportSize.height,
-                      cardWidth, cardHeight,
-                      renderSize.width, renderSize.height)
 
         return ZStack(alignment: .topLeading) {
             // Bottom Background - Use Tab Random background colour
