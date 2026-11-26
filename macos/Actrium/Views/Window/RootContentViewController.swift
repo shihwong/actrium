@@ -584,6 +584,30 @@ private enum ToolbarTabSectionID: Hashable {
     case ungrouped(afterGroupID: UUID?)
 }
 
+/// Tab titles and Group names are measured in the fonts they render in, and
+/// the strip asks every surface for its width on every layout pass — twice
+/// over, since the strip frame and the adaptive pass both resolve them.
+/// Measurement is real text layout, not a lookup, so memoise it: a string
+/// only ever measures to one width for the font it is drawn in.
+@MainActor
+private enum ToolbarTextMetrics {
+    /// Distinct strings seen so far. Titles change as pages load, so bound it.
+    private static var widths: [String: CGFloat] = [:]
+    private static let capacity = 512
+
+    static func width(of text: String, font: NSFont) -> CGFloat {
+        let key = "\(font.fontName)@\(font.pointSize)\u{1}\(text)"
+        if let cached = widths[key] { return cached }
+
+        if widths.count >= capacity {
+            widths.removeAll(keepingCapacity: true)
+        }
+        let measured = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        widths[key] = measured
+        return measured
+    }
+}
+
 private struct ToolbarTabSection: Identifiable {
     let id: ToolbarTabSectionID
     let group: TabGroup?
@@ -1031,10 +1055,11 @@ struct MainWindowTabsView: View {
         // Named header: chevron (16) + spacing (3) + name + spacing (5) +
         // count + padding (10). Measure the name with the font it renders in
         // so wide glyphs (CJK, for example) are not clipped.
-        let nameWidth = (groupDisplayName(group) as NSString).size(withAttributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .semibold)
-        ]).width
-        return min(176, max(82, 34 + ceil(nameWidth) + countWidth + separation + 2))
+        let nameWidth = ToolbarTextMetrics.width(
+            of: groupDisplayName(group),
+            font: .systemFont(ofSize: 12, weight: .semibold)
+        )
+        return min(176, max(82, 34 + nameWidth + countWidth + separation + 2))
     }
 
     private func tabStripWidth(in toolbarWidth: CGFloat) -> CGFloat {
@@ -1069,10 +1094,9 @@ struct MainWindowTabsView: View {
         }
 
         let title = tab.title.isEmpty ? "New Tab" : tab.title
-        let titleWidth = ceil(
-            (title as NSString).size(
-                withAttributes: [.font: NSFont.systemFont(ofSize: 12.5)]
-            ).width
+        let titleWidth = ToolbarTextMetrics.width(
+            of: title,
+            font: .systemFont(ofSize: 12.5)
         )
         return min(
             CompactToolbarLayout.inactiveTabMaxWidth,
